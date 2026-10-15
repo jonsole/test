@@ -1,6 +1,6 @@
 # 6502E — An Enhanced 6502 CPU
 
-Design specification, draft 0.3
+Design specification, draft 0.4
 
 The 6502E is a superset of the NMOS 6502. It adds:
 
@@ -13,9 +13,9 @@ On reset the 6502E runs code that uses only documented 6502 instructions,
 unmodified and with the same timing. The 64 opcodes in columns `$x3`, `$x7`,
 `$xB`, and `$xF`, which are undocumented on the NMOS 6502, become single-byte B
 versions of the A instructions. Every other B instruction also has a
-single-byte opcode, taken from NMOS NOP and JAM slots (§3.2). The 16-bit and
-extended instructions are reached through two prefixes, which also occupy JAM
-slots. A JAM opcode locks up a real 6502, so no working program uses one.
+single-byte opcode, taken from NMOS NOP and JAM slots (§3.2). The 16-bit,
+extended, and bit-operation instructions are reached through three prefixes,
+which also occupy JAM slots. A JAM opcode locks up a real 6502, so no working program uses one.
 
 ---
 
@@ -28,7 +28,7 @@ slots. A JAM opcode locks up a real 6502, so no working program uses one.
    instructions. Software that relies on those opcodes, such as some C64 demos
    and games, will not run. This applies in both modes: there is no
    emulation-mode fallback to the NMOS behaviour, so B is always available.
-   Elsewhere, the eight undocumented NOPs listed in §3.2 and five of the JAM
+   Elsewhere, the eight undocumented NOPs listed in §3.2 and six of the JAM
    slots are reused. All other undocumented opcodes keep their NMOS
    behaviour.
 2. **The instruction stream never depends on the mode.** The length of an
@@ -114,7 +114,7 @@ overlap. This is legal, and the programmer is responsible for it.
 | X, Y width | 8-bit (high bytes held at `$00`) | 16-bit |
 | zp,X / zp,Y / (zp,X) / (zp),Y pointer wrap | wraps within page Z, as on the 6502 | no wrap; carries into the next page |
 | `JMP (abs)` page-boundary bug | kept | fixed |
-| Interrupt vectors | `$FFFA` / `$FFFC` / `$FFFE` | native vectors (§6) |
+| Interrupt vectors | `$FFFA` / `$FFFC` / `$FFFE` | native vectors (§7) |
 | B, D, Z, and new instructions | available | available |
 
 Switching modes: `CLC` then `XCE` enters native mode. `SEC` then `XCE` returns
@@ -192,19 +192,20 @@ the low byte. Flags are the same as for the A forms.
 ### 3.3 Prefixes
 
 The NMOS JAM opcodes are `$02 $12 $22 $32 $42 $52 $62 $72 $92 $B2 $D2 $F2`.
-Three of them hold B transfers (§3.2), two become prefixes, and the rest are
-reserved.
+Three of them hold B transfers (§3.2), three become prefixes, and the rest
+are reserved.
 
 | Prefix | Name | Effect on the following opcode |
 |---|---|---|
 | `$12` | **WX** (wide) | Makes the operation 16-bit: A becomes D, X/Y memory operands become 16-bit, and memory read-modify-write becomes 16-bit |
 | `$22` | **EX** (extended) | The next byte is an opcode from the extended page (§5) |
-| `$02 $32 $42 $52 $62 $72 $F2` | — | Reserved, and still JAM. Possible future uses: bank prefix, second extended page |
+| `$32` | **BP** (bit page) | The next byte is a bit-operation opcode (§6) |
+| `$02 $42 $52 $62 $72 $F2` | — | Reserved, and still JAM. Possible future use: bank prefix |
 
 Rules:
 - Each prefix adds 1 byte and 1 cycle.
-- WX combined with EX is reserved. Extended-page instructions choose their
-  own width (§5).
+- WX combined with EX or BP is reserved. Extended-page instructions choose
+  their own width (§5). Bit operations are always 8-bit (§6).
 - A prefix in front of an opcode it does not apply to is reserved. The intent
   is that this raises an illegal-opcode trap on a future revision, so it must
   not be treated as a NOP.
@@ -295,7 +296,100 @@ Candidates for later revisions, with no encoding assigned yet: 65C02 extras
 
 ---
 
-## 6. Interrupts and reset
+## 6. Bit-operation page (`$32 xx`)
+
+The prefix `$32` (BP) is followed by one opcode byte that encodes the whole
+instruction: the operation, the addressing mode, and the bit number.
+
+```
+ 7  6   5  4  3   2  1  0
++-----+---------+---------+
+| op  |  mode   |   bit   |
++-----+---------+---------+
+```
+
+### 6.1 Operations
+
+| `op` | Range | Mnemonic | Operation |
+|---|---|---|---|
+| `00` | `$00–$3F` | `BTST #n,ea` | test bit n |
+| `01` | `$40–$7F` | `BSET #n,ea` | test bit n, then set it to 1 |
+| `10` | `$80–$BF` | `BCLR #n,ea` | test bit n, then clear it to 0 |
+| `11` | `$C0–$FF` | `BCHG #n,ea` | test bit n, then invert it |
+
+**Flags:** all four set the Z flag from the bit's value *before* the
+operation (Z = 1 if the bit was 0) and leave N, V, and C unchanged. This
+follows the 68000. Because every operation tests first, `BSET` is a
+test-and-set: one instruction both claims a flag and reports whether it was
+already taken. An interrupt cannot split an instruction, so this works as a
+lock between main code and interrupt handlers. It is not a bus lock against
+other bus masters such as DMA or a second CPU.
+
+`BCHG` (toggle) is the fourth operation because the 2-bit field has room
+for it, and it covers LED blinking and bit-banging clock lines.
+
+### 6.2 Addressing modes
+
+| `mode` | Offset | Operand | Total bytes | Cycles: BTST | Cycles: BSET/BCLR/BCHG |
+|---|---|---|---|---|---|
+| `000` | `+$00` | `A` | 2 | 3 | 3 |
+| `001` | `+$08` | `B` | 2 | 3 | 3 |
+| `010` | `+$10` | `zp` | 3 | 4 | 6 |
+| `011` | `+$18` | `zp,X` | 3 | 5 | 7 |
+| `100` | `+$20` | `abs` | 4 | 5 | 7 |
+| `101` | `+$28` | `abs,X` | 4 | 5 (+1 if a page is crossed) | 8 |
+| `110` | `+$30` | `abs,Y` | 4 | 5 (+1 if a page is crossed) | 8 |
+| `111` | `+$38` | `(zp),Y` | 3 | 6 (+1 if a page is crossed) | 9 |
+
+Each count is 1 more than the matching 6502 instruction, because of the
+prefix. `BTST` is timed like `LDA` in the same mode. The other three are timed
+like `INC`, or like NMOS `DCP` for `abs,Y` and `(zp),Y`, which `INC` lacks. Zero-page modes use page
+Z. Indexed modes use 16-bit X/Y in native mode, as in §4.
+
+The opcode is `op×$40 + mode offset + n`. Examples:
+
+| Instruction | Encoding |
+|---|---|
+| `BTST #7,A` | `$32 07` |
+| `BSET #0,B` | `$32 48` |
+| `BSET #3,flags` (zp) | `$32 53 zz` |
+| `BCLR #2,$DC00` | `$32 A2 00 DC` |
+| `BCHG #5,table,X` (abs) | `$32 ED ll hh` |
+
+### 6.3 Examples
+
+Toggling one bit of an I/O port:
+
+```asm
+        ; 6502: 8 bytes, 10 cycles, and A is overwritten
+        lda PORT
+        eor #%00100000
+        sta PORT
+
+        ; 6502E: 4 bytes, 7 cycles, no registers touched
+        bchg #5,PORT
+```
+
+Semaphore shared with an interrupt handler:
+
+```asm
+claim:  bset #7,lock        ; Z = 1 if the lock was free; it is now taken
+        beq got_it
+        ...                 ; already held: retry or give up
+got_it: ...
+        bclr #7,lock        ; release
+```
+
+Branching on a bit in a register without changing it:
+
+```asm
+        btst #4,b
+        bne bit_is_set
+```
+
+---
+
+## 7. Interrupts and reset
 
 ### Reset
 E = 1, Z = `$00`, high bytes of X/Y = `$00`, I = 1, D (decimal flag) undefined
@@ -330,9 +424,9 @@ Separate native vectors are needed because a legacy handler that saved X with
 
 ---
 
-## 7. Examples
+## 8. Examples
 
-### 7.1 Copying a block of up to 64 KB
+### 8.1 Copying a block of up to 64 KB
 
 ```asm
         clc
@@ -348,7 +442,7 @@ loop:   lda (src),y         ; 16-bit Y: no page stepping
 The equivalent 6502 code needs an outer loop that increments `src+1` and
 `dst+1` and counts pages.
 
-### 7.2 Adding two 16-bit numbers
+### 8.2 Adding two 16-bit numbers
 
 ```asm
         ; 6502: 13 bytes, 20 cycles (zp)
@@ -367,7 +461,7 @@ The equivalent 6502 code needs an outer loop that increments `src+1` and
         std r               ; $12 85 zz
 ```
 
-### 7.3 8×8 multiply
+### 8.3 8×8 multiply
 
 ```asm
         lda #23
@@ -376,7 +470,7 @@ The equivalent 6502 code needs an outer loop that increments `src+1` and
         std result
 ```
 
-### 7.4 Per-task zero page
+### 8.4 Per-task zero page
 
 ```asm
 switch: ; X = index of the next task
@@ -388,7 +482,7 @@ switch: ; X = index of the next task
 
 ---
 
-## 8. Implementation notes
+## 9. Implementation notes
 
 - **Register file:** add B (8 bits), the high bytes XH and YH (8 bits each),
   Z (8 bits), and the E flip-flop. In emulation mode, XH and YH are cleared and
@@ -399,10 +493,17 @@ switch: ; X = index of the next task
   the accumulator bus and no new timing states. The twelve B opcodes in §3.2
   reuse the timing of their A forms and set the same accumulator-select
   line.
-- **Prefix latches:** WIDE and EXT are set by the prefix fetch and cleared at
-  the next opcode fetch. While WIDE is set, the decoder inserts a second
+- **Prefix latches:** WIDE, EXT, and BITP are set by the prefix fetch and
+  cleared at the next opcode fetch. While WIDE is set, the decoder inserts a second
   ALU pass that handles the high byte (B, XH, or YH, or `ea+1`) using the
   carry from the first pass.
+- **Bit operations:** opcode bits 0–2 drive a 3-to-8 decoder that produces
+  the mask `1 << n`. The ALU's existing OR, AND, and EOR paths do set, test,
+  and toggle. Clear needs the inverted mask on the second ALU input. The
+  memory forms reuse the read-modify-write sequence of `INC`/`DEC`,
+  including the dummy write. Addressing modes `abs,Y` and `(zp),Y` have no
+  6502 RMW instruction, so they need new sequences; these match the NMOS
+  undocumented `DCP abs,Y` and `DCP (zp),Y` timing.
 - **Zero-page high-byte mux:** wherever the 6502 forces ADH to `$00`, drive
   ADH from Z instead. The native-mode no-wrap behaviour lets the carry from the
   ADL adder ripple into ADH. That path already exists for absolute indexed
@@ -417,7 +518,7 @@ switch: ; X = index of the next task
 
 ---
 
-## 9. Open questions
+## 10. Open questions
 
 1. **Z granularity.** Z is currently a page number (fast). A full 16-bit Z,
    like the 65816 D register, would allow any alignment but adds an adder and
@@ -425,4 +526,4 @@ switch: ; X = index of the next task
 2. **Stack.** Should native mode have a 16-bit SP, or an "S page" register
    like Z? With 16-bit indices, a 256-byte stack may become the next limit.
 3. **Address space.** Is 64 KB enough, or should a reserved prefix (for
-   example `$32`) select a bank register for long addressing?
+   example `$42`) select a bank register for long addressing?

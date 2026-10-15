@@ -1,6 +1,6 @@
 # 6502E — An Enhanced 6502 CPU
 
-Design specification, draft 0.2
+Design specification, draft 0.3
 
 The 6502E is a superset of the NMOS 6502. It adds:
 
@@ -12,9 +12,10 @@ The 6502E is a superset of the NMOS 6502. It adds:
 On reset the 6502E runs code that uses only documented 6502 instructions,
 unmodified and with the same timing. The 64 opcodes in columns `$x3`, `$x7`,
 `$xB`, and `$xF`, which are undocumented on the NMOS 6502, become single-byte B
-versions of the A instructions. The other new features are reached through
-opcode prefixes that occupy the NMOS "JAM" opcode slots, which lock up a real
-6502.
+versions of the A instructions. Every other B instruction also has a
+single-byte opcode, taken from NMOS NOP and JAM slots (§3.2). The 16-bit and
+extended instructions are reached through two prefixes, which also occupy JAM
+slots. A JAM opcode locks up a real 6502, so no working program uses one.
 
 ---
 
@@ -25,8 +26,11 @@ opcode prefixes that occupy the NMOS "JAM" opcode slots, which lock up a real
    `$x3/$x7/$xB/$xF` (SLO, RLA, SRE, RRA, SAX, LAX, DCP, ISC, ANC, ALR, ARR,
    SBX, and the rest) are given up so that B gets full-speed single-byte
    instructions. Software that relies on those opcodes, such as some C64 demos
-   and games, will not run. Undocumented opcodes in the other columns keep
-   their NMOS behaviour, apart from the 12 JAM slots, which are reused.
+   and games, will not run. This applies in both modes: there is no
+   emulation-mode fallback to the NMOS behaviour, so B is always available.
+   Elsewhere, the eight undocumented NOPs listed in §3.2 and five of the JAM
+   slots are reused. All other undocumented opcodes keep their NMOS
+   behaviour.
 2. **The instruction stream never depends on the mode.** The length of an
    instruction is always known from its opcode bytes alone. The 65816 does
    not have this property: there, the length of `LDA #` depends on the M flag.
@@ -150,48 +154,61 @@ and flag behaviour as its A counterpart, and needs no prefix.
 | `SBCB` | `E3` | `E7` | `EB` | `EF` | `F3` | `F7` | `FB` | `FF` |
 
 A store to an immediate operand is meaningless (the A-side `$89` is
-undocumented too), so **`$8B` is spare**. It is reserved for now and is the
-only free single-byte slot in this column.
+undocumented too). `$8B` is therefore used for `TXB` (§3.2), next to `TXA`
+at `$8A`.
 
-That gives 63 B instructions. Prefixes are not allowed on them: BX or WX in
-front of a `$x3/$x7/$xB/$xF` opcode is reserved.
+That gives 63 B instructions in this column. Prefixes are not allowed on
+them: WX in front of a `$x3/$x7/$xB/$xF` opcode is reserved.
 
-### 3.2 Prefixes
+### 3.2 The other B instructions
+
+Every remaining instruction that uses A also gets a single-byte B opcode, so
+B never needs a prefix. Where the opcode in the `+$10` position is free, the
+B form goes there, directly below the A form in the opcode map. That
+position was an NMOS NOP with the same instruction length, so the length rule
+still holds.
+
+| A form | B form | Mnemonic | Previous NMOS use | Bytes | Cycles |
+|---|---|---|---|---|---|
+| `ASL A` `$0A` | `$1A` | `ASLB` | NOP | 1 | 2 |
+| `ROL A` `$2A` | `$3A` | `ROLB` | NOP | 1 | 2 |
+| `LSR A` `$4A` | `$5A` | `LSRB` | NOP | 1 | 2 |
+| `ROR A` `$6A` | `$7A` | `RORB` | NOP | 1 | 2 |
+| `BIT zp` `$24` | `$34` | `BITB zp` | NOP zp,X | 2 | 3 |
+| `BIT abs` `$2C` | `$3C` | `BITB abs` | NOP abs,X | 3 | 4 |
+| `PHA` `$48` | `$DA` | `PHB` | NOP | 1 | 3 |
+| `PLA` `$68` | `$FA` | `PLB` | NOP | 1 | 4 |
+| `TXA` `$8A` | `$8B` | `TXB` | ANE #imm | 1 | 2 |
+| `TYA` `$98` | `$92` | `TYB` | JAM | 1 | 2 |
+| `TAX` `$AA` | `$B2` | `TBX` | JAM | 1 | 2 |
+| `TAY` `$A8` | `$D2` | `TBY` | JAM | 1 | 2 |
+
+The `+$10` slots for `PHA`, `PLA`, and the transfers are already used by
+documented instructions (`CLI`, `SEI`, `TXS`, `TSX`, `CLV`). Those B forms
+therefore go to the free NOP slots `$DA`/`$FA`, to `$8B`, and to JAM slots.
+`TBX` and `TBY` zero-extend B into X/Y in native mode. `TXB` and `TYB` copy
+the low byte. Flags are the same as for the A forms.
+
+### 3.3 Prefixes
 
 The NMOS JAM opcodes are `$02 $12 $22 $32 $42 $52 $62 $72 $92 $B2 $D2 $F2`.
-Three of them become prefixes, and the rest are reserved.
+Three of them hold B transfers (§3.2), two become prefixes, and the rest are
+reserved.
 
 | Prefix | Name | Effect on the following opcode |
 |---|---|---|
-| `$02` | **BX** (B-select) | Replaces A with B in the accumulator instructions that have no direct B form (§3.3) |
 | `$12` | **WX** (wide) | Makes the operation 16-bit: A becomes D, X/Y memory operands become 16-bit, and memory read-modify-write becomes 16-bit |
 | `$22` | **EX** (extended) | The next byte is an opcode from the extended page (§5) |
-| others | — | Reserved, and still JAM. Possible future uses: bank prefix, second extended page |
+| `$02 $32 $42 $52 $62 $72 $F2` | — | Reserved, and still JAM. Possible future uses: bank prefix, second extended page |
 
 Rules:
 - Each prefix adds 1 byte and 1 cycle.
-- BX followed by WX, in either order, is reserved. Assemblers must reject it.
 - WX combined with EX is reserved. Extended-page instructions choose their
   own width (§5).
 - A prefix in front of an opcode it does not apply to is reserved. The intent
   is that this raises an illegal-opcode trap on a future revision, so it must
   not be treated as a NOP.
 - An interrupt is never taken between a prefix and the opcode it modifies.
-
-### 3.3 Opcodes BX ($02) applies to
-
-The ALU group has direct B opcodes (§3.1), so BX is needed only for the
-instructions that use A outside that group. BX in front of an ALU-group
-opcode (`$x1/$x5/$x9/$xD`) is reserved, so that every B instruction has
-exactly one encoding.
-
-| 6502 | With BX | Mnemonic |
-|---|---|---|
-| `BIT zp` / `BIT abs` | `$02 24 zz` / `$02 2C ll hh` | `BITB` |
-| `ASL A` … | `$02 0A` | `ASLB LSRB ROLB RORB` |
-| `TAX` / `TAY` | `$02 AA` | `TBX` / `TBY` (zero-extended into X/Y) |
-| `TXA` / `TYA` | `$02 8A` | `TXB` / `TYB` (low byte) |
-| `PHA` / `PLA` | `$02 48` | `PHB` / `PLB` |
 
 ### 3.4 Opcodes WX ($12) applies to
 
@@ -379,10 +396,11 @@ switch: ; X = index of the next task
 - **Accumulator select:** for the ALU group (`IR[0] = 1`), opcode bit `IR[1]`
   chooses A (0) or B (1). The rest of the decode for `$x3/$x7/$xB/$xF` is the
   same as for `$x1/$x5/$x9/$xD`, so the direct B instructions cost one mux on
-  the accumulator bus and no new timing states.
-- **Prefix latches:** BSEL, WIDE, and EXT are set by the prefix fetch and
-  cleared at the next opcode fetch. While BSEL is set, the decoder routes
-  accumulator reads and writes to B. While WIDE is set, it inserts a second
+  the accumulator bus and no new timing states. The twelve B opcodes in §3.2
+  reuse the timing of their A forms and set the same accumulator-select
+  line.
+- **Prefix latches:** WIDE and EXT are set by the prefix fetch and cleared at
+  the next opcode fetch. While WIDE is set, the decoder inserts a second
   ALU pass that handles the high byte (B, XH, or YH, or `ea+1`) using the
   carry from the first pass.
 - **Zero-page high-byte mux:** wherever the 6502 forces ADH to `$00`, drive
@@ -408,14 +426,3 @@ switch: ; X = index of the next task
    like Z? With 16-bit indices, a 256-byte stack may become the next limit.
 3. **Address space.** Is 64 KB enough, or should a reserved prefix (for
    example `$32`) select a bank register for long addressing?
-4. **Keeping the undocumented opcodes in emulation mode.** An undocumented
-   opcode in these columns is the same length as the B instruction that
-   replaces it. The decoder could therefore run the NMOS undocumented
-   behaviour when E = 1 and the B instructions only when E = 0, without
-   breaking principle 2. This would restore compatibility with C64-style
-   software, but B would then be usable only in native mode.
-5. **The rest of the B instructions.** The shifts, transfers, `PHB`/`PLB`,
-   and `BITB` still need the BX prefix. Free single-byte slots could hold the
-   most common ones: `$8B`, and the NMOS NOPs at `$1A $3A $5A $7A $DA $FA`.
-   For example, `ASLB ROLB LSRB RORB` could go at `$1A $3A $5A $7A`, directly
-   below `ASL A ROL A LSR A ROR A`.

@@ -1,6 +1,6 @@
 # 6502E — An Enhanced 6502 CPU
 
-Design specification, draft 0.4
+Design specification, draft 0.5
 
 The 6502E is a superset of the NMOS 6502. It adds:
 
@@ -200,7 +200,7 @@ are reserved.
 | `$12` | **WX** (wide) | Makes the operation 16-bit: A becomes D, X/Y memory operands become 16-bit, and memory read-modify-write becomes 16-bit |
 | `$22` | **EX** (extended) | The next byte is an opcode from the extended page (§5) |
 | `$32` | **BP** (bit page) | The next byte is a bit-operation opcode (§6) |
-| `$02 $42 $52 $62 $72 $F2` | — | Reserved, and still JAM. Possible future use: bank prefix |
+| `$02 $42 $52 $62 $72 $F2` | — | Reserved, and still JAM |
 
 Rules:
 - Each prefix adds 1 byte and 1 cycle.
@@ -291,8 +291,7 @@ remember.
 All other `$22 xx` codes are reserved.
 
 Candidates for later revisions, with no encoding assigned yet: 65C02 extras
-(`BRA`, `STZ`, `INC A`, `TRB`/`TSB`), 16-bit relative branches, `DIV`, and a
-16-bit stack pointer.
+(`BRA`, `STZ`, `INC A`, `TRB`/`TSB`), 16-bit relative branches, and `DIV`.
 
 ---
 
@@ -518,12 +517,21 @@ switch: ; X = index of the next task
 
 ---
 
-## 10. Open questions
+## 10. Design decisions
 
-1. **Z granularity.** Z is currently a page number (fast). A full 16-bit Z,
-   like the 65816 D register, would allow any alignment but adds an adder and
-   sometimes a cycle.
-2. **Stack.** Should native mode have a 16-bit SP, or an "S page" register
-   like Z? With 16-bit indices, a 256-byte stack may become the next limit.
-3. **Address space.** Is 64 KB enough, or should a reserved prefix (for
-   example `$42`) select a bank register for long addressing?
+These questions were raised during the design and settled as follows.
+
+1. **Z stays a page number.** A full 16-bit Z like the 65816's D register
+   would allow any alignment, but it needs an adder and sometimes costs a
+   cycle. Keeping Z page-aligned means zero-page instructions always run at
+   6502 speed.
+2. **The stack stays 8-bit, in page `$01`.** Native mode has no 16-bit SP
+   and no movable stack page. Stack behaviour is identical in both modes.
+3. **The address space stays 64 KB.** There is no bank register and no long
+   addressing. 16-bit X and Y already reach the whole address space.
+4. **No emulation-mode fallback for the undocumented opcodes** (§1). The
+   direct B instructions are active in both modes.
+5. **Every B instruction has a single-byte opcode** (§3.1, §3.2). There is
+   no B prefix.
+6. **No branch-on-bit instructions.** Test with `BTST`, then branch with
+   `BEQ`/`BNE` (§6).

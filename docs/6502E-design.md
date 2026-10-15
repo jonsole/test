@@ -1,6 +1,6 @@
 # 6502E — An Enhanced 6502 CPU
 
-Design specification, draft 0.1
+Design specification, draft 0.2
 
 The 6502E is a superset of the NMOS 6502. It adds:
 
@@ -9,18 +9,24 @@ The 6502E is a superset of the NMOS 6502. It adds:
 - 16-bit index registers, **X** and **Y**
 - a movable zero page, set by the 8-bit **Z** register
 
-On reset the 6502E runs unmodified 6502 code with the same timing. The new
-features are reached through opcode prefixes that occupy the NMOS "JAM" opcode
-slots, which lock up a real 6502, so no working 6502 program uses them.
+On reset the 6502E runs code that uses only documented 6502 instructions,
+unmodified and with the same timing. The 64 opcodes in columns `$x3`, `$x7`,
+`$xB`, and `$xF`, which are undocumented on the NMOS 6502, become single-byte B
+versions of the A instructions. The other new features are reached through
+opcode prefixes that occupy the NMOS "JAM" opcode slots, which lock up a real
+6502.
 
 ---
 
 ## 1. Design principles
 
-1. **Binary compatibility.** Every documented NMOS opcode, and every stable
-   undocumented one (LAX, SAX, DCP, ISC, SLO, RLA, SRE, RRA, ANC, ALR, ARR,
-   SBX, and so on), keeps its meaning, length, and cycle count. The design
-   only reuses the 12 JAM slots.
+1. **Compatibility with documented code.** Every documented NMOS opcode keeps
+   its meaning, length, and cycle count. The undocumented opcodes in columns
+   `$x3/$x7/$xB/$xF` (SLO, RLA, SRE, RRA, SAX, LAX, DCP, ISC, ANC, ALR, ARR,
+   SBX, and the rest) are given up so that B gets full-speed single-byte
+   instructions. Software that relies on those opcodes, such as some C64 demos
+   and games, will not run. Undocumented opcodes in the other columns keep
+   their NMOS behaviour, apart from the 12 JAM slots, which are reused.
 2. **The instruction stream never depends on the mode.** The length of an
    instruction is always known from its opcode bytes alone. The 65816 does
    not have this property: there, the length of `LDA #` depends on the M flag.
@@ -113,14 +119,51 @@ value of E in C, so code can test which mode it was called in.
 
 ---
 
-## 3. Opcode prefixes
+## 3. Opcode encoding
+
+### 3.1 Direct B instructions (columns `$x3 $x7 $xB $xF`)
+
+The 6502's main ALU group has opcodes of the form `aaa bbb 01`. Here `aaa`
+selects the operation (ORA, AND, EOR, ADC, STA, LDA, CMP, SBC) and `bbb`
+selects the addressing mode. On the NMOS 6502, the matching `aaa bbb 11`
+opcodes are undocumented. On the 6502E they are the same operations with
+**B** in place of A:
+
+```
+opcode = aaa bbb 01   ->  operation on A
+opcode = aaa bbb 11   ->  same operation on B   (bit 1 selects the accumulator)
+```
+
+This adds the value 2 to the A opcode: `LDA #` is `$A9`, so `LDB #` is `$AB`.
+Each B instruction has the same length, cycle count, page-crossing penalty,
+and flag behaviour as its A counterpart, and needs no prefix.
+
+| | (zp,X) | zp | #imm | abs | (zp),Y | zp,X | abs,Y | abs,X |
+|---|---|---|---|---|---|---|---|---|
+| `ORB`  | `03` | `07` | `0B` | `0F` | `13` | `17` | `1B` | `1F` |
+| `ANDB` | `23` | `27` | `2B` | `2F` | `33` | `37` | `3B` | `3F` |
+| `EORB` | `43` | `47` | `4B` | `4F` | `53` | `57` | `5B` | `5F` |
+| `ADCB` | `63` | `67` | `6B` | `6F` | `73` | `77` | `7B` | `7F` |
+| `STB`  | `83` | `87` | *`8B`* | `8F` | `93` | `97` | `9B` | `9F` |
+| `LDB`  | `A3` | `A7` | `AB` | `AF` | `B3` | `B7` | `BB` | `BF` |
+| `CMPB` | `C3` | `C7` | `CB` | `CF` | `D3` | `D7` | `DB` | `DF` |
+| `SBCB` | `E3` | `E7` | `EB` | `EF` | `F3` | `F7` | `FB` | `FF` |
+
+A store to an immediate operand is meaningless (the A-side `$89` is
+undocumented too), so **`$8B` is spare**. It is reserved for now and is the
+only free single-byte slot in this column.
+
+That gives 63 B instructions. Prefixes are not allowed on them: BX or WX in
+front of a `$x3/$x7/$xB/$xF` opcode is reserved.
+
+### 3.2 Prefixes
 
 The NMOS JAM opcodes are `$02 $12 $22 $32 $42 $52 $62 $72 $92 $B2 $D2 $F2`.
 Three of them become prefixes, and the rest are reserved.
 
 | Prefix | Name | Effect on the following opcode |
 |---|---|---|
-| `$02` | **BX** (B-select) | Replaces A with B in accumulator instructions |
+| `$02` | **BX** (B-select) | Replaces A with B in the accumulator instructions that have no direct B form (§3.3) |
 | `$12` | **WX** (wide) | Makes the operation 16-bit: A becomes D, X/Y memory operands become 16-bit, and memory read-modify-write becomes 16-bit |
 | `$22` | **EX** (extended) | The next byte is an opcode from the extended page (§5) |
 | others | — | Reserved, and still JAM. Possible future uses: bank prefix, second extended page |
@@ -135,25 +178,22 @@ Rules:
   not be treated as a NOP.
 - An interrupt is never taken between a prefix and the opcode it modifies.
 
-### 3.1 Opcodes BX ($02) applies to
+### 3.3 Opcodes BX ($02) applies to
 
-These instructions, in every addressing mode they have:
-
-`ORA AND EOR ADC STA LDA CMP SBC BIT`, `ASL A LSR A ROL A ROR A`,
-`TAX TAY TXA TYA`, `PHA PLA`
+The ALU group has direct B opcodes (§3.1), so BX is needed only for the
+instructions that use A outside that group. BX in front of an ALU-group
+opcode (`$x1/$x5/$x9/$xD`) is reserved, so that every B instruction has
+exactly one encoding.
 
 | 6502 | With BX | Mnemonic |
 |---|---|---|
-| `LDA` | `$02 A9 nn` | `LDB #nn` |
-| `STA abs` | `$02 8D ll hh` | `STB abs` |
-| `ADC zp` | `$02 65 zz` | `ADCB zp` |
-| `ORA`/`AND`/`EOR`/`CMP`/`SBC`/`BIT` | | `ORB ANDB EORB CMPB SBCB BITB` |
+| `BIT zp` / `BIT abs` | `$02 24 zz` / `$02 2C ll hh` | `BITB` |
 | `ASL A` … | `$02 0A` | `ASLB LSRB ROLB RORB` |
 | `TAX` / `TAY` | `$02 AA` | `TBX` / `TBY` (zero-extended into X/Y) |
 | `TXA` / `TYA` | `$02 8A` | `TXB` / `TYB` (low byte) |
 | `PHA` / `PLA` | `$02 48` | `PHB` / `PLB` |
 
-### 3.2 Opcodes WX ($12) applies to
+### 3.4 Opcodes WX ($12) applies to
 
 | Group | Effect | Mnemonics |
 |---|---|---|
@@ -170,7 +210,7 @@ X = `$0010`, and `CPX #$10` compares X with `$0010`. `STX` without WX stores
 only the low byte. `INX`, `DEX`, `INY`, and `DEY` always act on the full width
 of the register in the current mode.
 
-### 3.3 Flags for 16-bit operations
+### 3.5 Flags for 16-bit operations
 
 - N is bit 15 of the result. The Z flag is set when all 16 bits are zero.
 - C is the carry or borrow out of bit 15.
@@ -314,7 +354,7 @@ The equivalent 6502 code needs an outer loop that increments `src+1` and
 
 ```asm
         lda #23
-        ldb #11             ; $02 A9 0B
+        ldb #11             ; $AB 0B
         mul                 ; D = 253
         std result
 ```
@@ -336,6 +376,10 @@ switch: ; X = index of the next task
 - **Register file:** add B (8 bits), the high bytes XH and YH (8 bits each),
   Z (8 bits), and the E flip-flop. In emulation mode, XH and YH are cleared and
   held at zero.
+- **Accumulator select:** for the ALU group (`IR[0] = 1`), opcode bit `IR[1]`
+  chooses A (0) or B (1). The rest of the decode for `$x3/$x7/$xB/$xF` is the
+  same as for `$x1/$x5/$x9/$xD`, so the direct B instructions cost one mux on
+  the accumulator bus and no new timing states.
 - **Prefix latches:** BSEL, WIDE, and EXT are set by the prefix fetch and
   cleared at the next opcode fetch. While BSEL is set, the decoder routes
   accumulator reads and writes to B. While WIDE is set, it inserts a second
@@ -349,8 +393,9 @@ switch: ; X = index of the next task
   per extra byte, which keeps the core small. `MUL` uses an 8-step shift-add
   sequence through the existing ALU.
 - **Verification target:** in emulation mode with Z = `$00`, the core should
-  pass the Klaus Dormann 6502 functional test and the Wolfgang Lorenz
-  undocumented-opcode suite cycle for cycle.
+  pass the Klaus Dormann 6502 functional test cycle for cycle. The Wolfgang
+  Lorenz suite applies only to its documented-opcode tests, because the
+  `$x3/$x7/$xB/$xF` columns now hold the B instructions.
 
 ---
 
@@ -363,6 +408,14 @@ switch: ; X = index of the next task
    like Z? With 16-bit indices, a 256-byte stack may become the next limit.
 3. **Address space.** Is 64 KB enough, or should a reserved prefix (for
    example `$32`) select a bank register for long addressing?
-4. **Opcode density.** Hot instructions such as `TAB`/`TBA` could be given
-   single-byte slots, at the cost of breaking stable undocumented opcodes
-   (ANC, SBX, and others) that some existing software depends on.
+4. **Keeping the undocumented opcodes in emulation mode.** An undocumented
+   opcode in these columns is the same length as the B instruction that
+   replaces it. The decoder could therefore run the NMOS undocumented
+   behaviour when E = 1 and the B instructions only when E = 0, without
+   breaking principle 2. This would restore compatibility with C64-style
+   software, but B would then be usable only in native mode.
+5. **The rest of the B instructions.** The shifts, transfers, `PHB`/`PLB`,
+   and `BITB` still need the BX prefix. Free single-byte slots could hold the
+   most common ones: `$8B`, and the NMOS NOPs at `$1A $3A $5A $7A $DA $FA`.
+   For example, `ASLB ROLB LSRB RORB` could go at `$1A $3A $5A $7A`, directly
+   below `ASL A ROL A LSR A ROR A`.

@@ -1,6 +1,7 @@
 # 6502E — An Enhanced 6502 CPU
 
-Design specification, draft 0.5
+Design specification, draft 0.6. Full opcode maps:
+[6502E-opcode-map.md](6502E-opcode-map.md).
 
 The 6502E is a superset of the NMOS 6502. It adds:
 
@@ -227,6 +228,10 @@ operands. In native mode an 8-bit operand is zero-extended: `LDX #$10` sets
 X = `$0010`, and `CPX #$10` compares X with `$0010`. `STX` without WX stores
 only the low byte. `INX`, `DEX`, `INY`, and `DEY` always act on the full width
 of the register in the current mode.
+
+In emulation mode X and Y stay 8-bit even with WX: `LDX.W` and `LDY.W` read
+both bytes but keep the high byte of the register at `$00`, and `STX.W` and
+`STY.W` store `$00` as the high byte.
 
 ### 3.5 Flags for 16-bit operations
 
